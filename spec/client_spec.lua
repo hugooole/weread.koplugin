@@ -380,4 +380,15 @@ end)
 expect(not ok and io.open(download_path .. ".part", "rb") == nil,
     "oversized file download did not remove its partial output")
 
+local gateway_calls = {}
+local recommend_client = Client:new(gateway_settings)
+recommend_client.gateway = function(_self, api_name, params)
+    gateway_calls[#gateway_calls + 1] = { api_name, params }
+    return { books = {} }
+end
+recommend_client:get_recommendations(20, 7)
+expect(gateway_calls[1][1] == "/book/recommend"
+    and gateway_calls[1][2].count == 20 and gateway_calls[1][2].maxIdx == 7,
+    "get_recommendations did not forward count/maxIdx to /book/recommend")
+
 print(("client_spec: %d checks"):format(checks))

@@ -698,7 +698,9 @@ end
 
 function LibraryView:headerBar()
     local size = Screen:scaleBySize(HEADER_SIZE)
-    local title = self.mode == "public_account" and _("Public Accounts")
+    local recommend = self.mode == "recommend"
+    local title = recommend and _("Recommendations")
+        or self.mode == "public_account" and _("Public Accounts")
         or T(_("Books · %1"), self.group_label or _("All"))
     local function button(text, icon, width, callback, align, icon_file, max_width)
         local widget = Button:new{
@@ -721,14 +723,16 @@ function LibraryView:headerBar()
     end
     local back = button(nil, "chevron.left", size, function() self:onClose() end)
     local location_width = self.screen_w - 4 * size
-    local location = button(title .. " ▾", nil, nil,
+    local location = button(recommend and title or (title .. " ▾"), nil, nil,
         function() self:showSourceMenu() end, "left", nil, location_width)
     local search = button(nil, "appbar.search", size,
         function() if self.on_search then self.on_search() end end, nil, "shelf-search.svg")
+    if recommend then search = HorizontalSpan:new{ width = 0 } end
     self.refresh_button = button(nil, "appbar.search", size,
         function() if self.on_refresh then self.on_refresh() end end, nil, "shelf-refresh.svg")
     local menu = button(nil, "appbar.menu", size, function() self:showOptions() end, nil, "shelf-menu.svg")
-    self._header_buttons = { back, location, search, self.refresh_button, menu }
+    self._header_buttons = recommend and { back, location, self.refresh_button, menu }
+        or { back, location, search, self.refresh_button, menu }
     return VerticalGroup:new{
         align = "left",
         HorizontalGroup:new{ back, location,
@@ -748,6 +752,7 @@ function LibraryView:getScrollOffset()
 end
 
 function LibraryView:showSourceMenu(menu_mode)
+    if self.mode == "recommend" then return end
     local Menu = require("ui/widget/menu")
     menu_mode = menu_mode or self.mode
     local width = math.floor(self.screen_w * 0.9)
@@ -849,15 +854,21 @@ function LibraryView:showOptions()
     local function action(callback)
         return after_tap(function() UIManager:close(dialog) callback() end)
     end
-    local buttons = {{ {
-        text = T(_("Sort: %1"), self.sort_label or ""),
-        callback = action(function() if self.on_sort then self.on_sort() end end),
-    } }}
-    if self.mode == "books" then
-        buttons[#buttons + 1] = {{
-            text = T(_("Filter: %1"), self.filter_label or _("All")),
-            callback = action(function() if self.on_filter then self.on_filter() end end),
+    local recommend = self.mode == "recommend"
+    local buttons = {}
+    if not recommend then
+        buttons[1] = {{
+            text = T(_("Sort: %1"), self.sort_label or ""),
+            callback = action(function() if self.on_sort then self.on_sort() end end),
         }}
+    end
+    if self.mode == "books" or recommend then
+        if not recommend then
+            buttons[#buttons + 1] = {{
+                text = T(_("Filter: %1"), self.filter_label or _("All")),
+                callback = action(function() if self.on_filter then self.on_filter() end end),
+            }}
+        end
         local row = {}
         for _, option in ipairs({ { "list", _("List view") }, { "cover", _("Cover view") } }) do
             row[#row + 1] = {
@@ -867,7 +878,7 @@ function LibraryView:showOptions()
         end
         buttons[#buttons + 1] = row
     end
-    if not self.cover_mode then
+    if not self.cover_mode and not recommend then
         local row = {}
         for _, option in ipairs({ { true, _("Page mode") }, { false, _("Continuous scrolling") } }) do
             row[#row + 1] = {
@@ -877,13 +888,15 @@ function LibraryView:showOptions()
         end
         buttons[#buttons + 1] = row
     end
-    dialog = ButtonDialog:new{ title = _("Bookshelf"), buttons = buttons }
+    dialog = ButtonDialog:new{
+        title = recommend and _("Recommendations") or _("Bookshelf"), buttons = buttons }
     dialog.movable[1].radius = 0
     UIManager:show(dialog)
 end
 
 function LibraryView:itemStatus(book)
     if self.mode == "public_account" then return book.author or "" end
+    if self.mode == "recommend" then return book.reason or book.category or "" end
     local status = ""
     if book.readUpdateTime and book.readUpdateTime > 0 then
         status = os.date("%Y-%m-%d", book.readUpdateTime)
@@ -986,7 +999,7 @@ function LibraryView:content()
                 text = book.title or book.bookId or book.book_id or _("Untitled"),
                 status = self:itemStatus(book),
                 width = self.list_width,
-                font_size = self.mode == "books" and 20 or 22,
+                font_size = self.mode ~= "public_account" and 20 or 22,
                 show_parent = self,
                 callback = function()
                     if self.on_select then self.on_select(book, self.mode) end
@@ -1130,6 +1143,7 @@ function LibraryView:onShow()
 end
 
 function LibraryView:onCloseWidget()
+    if self.on_closed then self.on_closed(self) end
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
 end
 
@@ -1197,6 +1211,7 @@ function M.show(data, callbacks)
         on_filter = callbacks.on_filter,
         on_select = callbacks.on_select,
         on_page_changed = callbacks.on_page_changed,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
     return view

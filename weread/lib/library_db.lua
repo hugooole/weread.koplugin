@@ -190,6 +190,39 @@ function LibraryDB:getShelfArchives()
     return ok and archives or nil
 end
 
+-- Last fetched recommendations, so the Home screen can draw them offline.
+function LibraryDB:cacheRecommendations(books)
+    local db = self:open()
+    if not db or type(books) ~= "table" then return false end
+    local payload = encode(books)
+    if not payload then pcall(function() db:close() end) return false end
+    local stmt
+    local ok = pcall(function()
+        stmt = db:prepare([[
+            INSERT INTO shelf_state (name, payload) VALUES ('recommendations', ?)
+            ON CONFLICT(name) DO UPDATE SET payload=excluded.payload
+        ]])
+        stmt:reset():bind(payload):step()
+    end)
+    close_statement(stmt)
+    pcall(function() db:close() end)
+    return ok
+end
+
+function LibraryDB:getRecommendations()
+    local db = self:open()
+    if not db then return nil end
+    local stmt, books
+    local ok = pcall(function()
+        stmt = db:prepare("SELECT payload FROM shelf_state WHERE name='recommendations'")
+        local row = stmt:reset():step()
+        books = row and decode(row[1]) or nil
+    end)
+    close_statement(stmt)
+    pcall(function() db:close() end)
+    return ok and books or nil
+end
+
 function LibraryDB:getShelf()
     local db = self:open()
     if not db then return nil end

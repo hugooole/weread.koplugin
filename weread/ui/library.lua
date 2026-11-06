@@ -105,6 +105,7 @@ function M:closeWeReadUI()
     for _, field in ipairs({
         "_chapter_list_view",
         "_book_detail_view",
+        "recommend_view",
         "shelf_view",
     }) do
         local view = self[field]
@@ -118,6 +119,7 @@ end
 
 function M:onWeReadAccountChanged()
     self:closeWeReadUI()
+    self.recommend_books = nil
     self.shelf_regular = nil
     self.shelf_mp = nil
     self.shelf_books = nil
@@ -279,20 +281,31 @@ function M:fetchVisibleShelfCovers(view, items, options)
 
     local generation = self.shelf_cover_generation
     local index, changed = 1, false
+    -- Other views (recommendations) reuse this worker: they say how to tell
+    -- they are still on screen and how to redraw; the shelf keeps its defaults.
+    local function is_current()
+        if options.is_current then return options.is_current(view) end
+        return self.shelf_view == view
+    end
     local function finish_batch()
         self.shelf_cover_job = nil
-        if changed and generation == self.shelf_cover_generation and self.shelf_view == view then
+        if changed and generation == self.shelf_cover_generation and is_current() then
             local pruned = pcall(cache.prune, cache)
             if not pruned then logger.warn("bookshelf cover cache pruning failed") end
-            local next_options = {}
-            for key, value in pairs(options) do next_options[key] = value end
-            next_options.prepared_shelf = {
-                books = options.prepared_books or self.shelf_regular or {},
-                accounts = options.prepared_accounts or self.shelf_mp or {},
-            }
-            next_options.page = view.page
-            next_options.skip_cover_fetch_once = true
-            self:showShelfView(options.mode or "books", options.keyword, view, next_options)
+            if options.on_done then
+                options.on_done(view)
+                changed = false
+            else
+                local next_options = {}
+                for key, value in pairs(options) do next_options[key] = value end
+                next_options.prepared_shelf = {
+                    books = options.prepared_books or self.shelf_regular or {},
+                    accounts = options.prepared_accounts or self.shelf_mp or {},
+                }
+                next_options.page = view.page
+                next_options.skip_cover_fetch_once = true
+                self:showShelfView(options.mode or "books", options.keyword, view, next_options)
+            end
         end
         local pending = self.shelf_cover_pending
         self.shelf_cover_pending = nil
@@ -302,7 +315,7 @@ function M:fetchVisibleShelfCovers(view, items, options)
     end
 
     local function fetch_next()
-        if generation ~= self.shelf_cover_generation or self.shelf_view ~= view then
+        if generation ~= self.shelf_cover_generation or not is_current() then
             finish_batch()
             return
         end
@@ -1701,6 +1714,106 @@ function M:searchWithUI(keyword)
             end
         end
         self:showList(T(_("Search: %1"), keyword), items, _("No search results."))
+    end)
+end
+
+local RECOMMEND_COUNT = 40
+
+-- Draw (or redraw) the recommendation grid from self.recommend_books.
+function M:showRecommendView(old_view, page)
+    local LibraryView = require("weread.ui.library_view")
+    self.shelf_cover_generation = (self.shelf_cover_generation or 0) + 1
+    local books = self.recommend_books or {}
+    local cover_mode = self.settings:get("shelf").view_mode == "cover"
+    local layout = LibraryView.getLayout(cover_mode, #books, "recommend")
+    local cover_paths, cover_loading
+    if cover_mode then
+        cover_paths, cover_loading = {}, {}
+        local cache = self:getShelfCoverCache()
+        local online = self:isNetworkOnline()
+        local visible, clamped = shelf_page_items(books, page or 1, layout.page_size)
+        page = clamped
+        for _i, book in ipairs(visible) do
+            local path = cache:pathFor(book)
+            cover_paths[book] = path
+            if not path and shelf_cover_url(book) then
+                cover_loading[book] = online or cache:sourcePathFor(book) ~= nil
+            end
+        end
+    end
+    if old_view then UIManager:close(old_view) end
+    local view
+    view = LibraryView.show({
+        mode = "recommend",
+        books = books,
+        paged = true,
+        page = page or 1,
+        page_size = layout.page_size,
+        cover_mode = cover_mode,
+        cover_columns = cover_mode and layout.columns or nil,
+        cover_rows = cover_mode and layout.rows or nil,
+        cover_cell_height = cover_mode and layout.cell_height or nil,
+        cover_paths = cover_paths,
+        cover_loading = cover_loading,
+    }, {
+        on_select = function(book) self:showBookRecord(book) end,
+        -- Forget the view once it is gone so a late cover batch cannot reopen it.
+        on_closed = function()
+            if self.recommend_view == view then self.recommend_view = nil end
+        end,
+        on_page_changed = function(new_page) self:showRecommendView(view, new_page) end,
+        on_refresh = function() self:showRecommendations(true, view) end,
+        on_display_change = function(key, value)
+            local shelf = self.settings:get("shelf")
+            shelf[key] = value
+            self.settings:set("shelf", shelf)
+            self.settings:flush()
+            self:showRecommendView(view, 1)
+        end,
+    })
+    self.recommend_view = view
+    if cover_mode then
+        self:fetchVisibleShelfCovers(view, books, {
+            is_current = function(candidate) return self.recommend_view == candidate end,
+            on_done = function(candidate) self:showRecommendView(candidate, candidate.page) end,
+        })
+    end
+end
+
+-- Personalized recommendations as a cover grid. `refresh` continues after the
+-- last book's searchIdx to fetch a new batch.
+function M:showRecommendations(refresh, old_view)
+    if not self:requireLogin(true, true) then
+        return
+    end
+    local max_idx
+    if refresh then
+        local last = (self.recommend_books or {})[#(self.recommend_books or {})]
+        max_idx = last and last.searchIdx or nil
+    end
+    self:runOnlineTask(_("Recommendations"), function()
+        local ok, result = pcall(function()
+            return self.client:get_recommendations(RECOMMEND_COUNT, max_idx)
+        end)
+        if not ok then
+            logger.err("recommendations failed:", log_error(result))
+            self:showInfo(T(_("Load recommendations failed:\n%1"), display_error(result)))
+            return
+        end
+        local books = type(result) == "table" and result.books or nil
+        if not books or #books == 0 then
+            if refresh then
+                self:showInfo(_("No more recommendations."))
+            else
+                self:showList(_("Recommendations"), {}, _("No recommendations."))
+            end
+            return
+        end
+        -- The user may have left the screen while the request was running.
+        if old_view and self.recommend_view ~= old_view then return end
+        self.recommend_books = books
+        if self.library_db then self.library_db:cacheRecommendations(books) end
+        self:showRecommendView(old_view, 1)
     end)
 end
 

@@ -554,4 +554,37 @@ if native_widgets then
     print("native bookshelf geometry: real KOReader Button and layout containers passed")
 end
 
+-- Recommendation mode: same cover grid, a reduced header and no shelf-only controls.
+local recommend_books = {}
+for index = 1, 8 do
+    recommend_books[index] = { bookId = "r" .. index, title = "Rec " .. index, reason = "Because " .. index }
+end
+local recommend_selected
+local recommend_view = LibraryView.show({
+    mode = "recommend", books = recommend_books, paged = true, page = 1, page_size = 6,
+    cover_mode = true, cover_columns = 3,
+}, { on_select = function(book, mode) recommend_selected = { book = book, mode = mode } end })
+expect(#recommend_view._header_buttons == 4,
+    "recommendation header should omit the search button")
+expect(recommend_view._header_buttons[2].text == "Recommendations",
+    "recommendation header showed the shelf title or dropdown arrow")
+expect(recommend_view.page_count == 2 and #recommend_view._item_rows == 6
+        and #recommend_view._focus_item_rows == 2,
+    "recommendations did not reuse the paged cover grid over their own books")
+recommend_view._item_rows[2].callback()
+expect(recommend_selected and recommend_selected.book == recommend_books[2]
+        and recommend_selected.mode == "recommend",
+    "recommendation cover selection lost its book or mode")
+expect(recommend_view:itemStatus(recommend_books[1]) == "Because 1",
+    "recommendation status should show the recommendation reason")
+local shelf_view_buttons = LibraryView.show({
+    mode = "books", books = recommend_books, paged = true, page = 1, page_size = 6,
+}, {})
+expect(#shelf_view_buttons._header_buttons == 5
+        and shelf_view_buttons._header_buttons[2].text:find("▾", 1, true),
+    "recommendation changes leaked into the bookshelf header")
+local shown_before_menu = #shown
+recommend_view:showSourceMenu()
+expect(#shown == shown_before_menu, "recommendation source menu should not open anything")
+
 print(("empty_state_face_spec: %d checks"):format(checks))
