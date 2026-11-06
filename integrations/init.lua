@@ -5,6 +5,8 @@ local logger = require("weread.lib.logger")
 local Integrations = {}
 local modules = {
     require("integrations.zenui"),
+    require("integrations.simpleui"),
+    require("integrations.simpleui_module"),
 }
 
 function Integrations.register(plugin)

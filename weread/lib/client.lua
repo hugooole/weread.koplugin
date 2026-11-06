@@ -645,6 +645,10 @@ function Client:get_book_info(book_id)
     return self:gateway("/book/info", { bookId = book_id })
 end
 
+function Client:get_recommendations(count, max_idx)
+    return self:gateway("/book/recommend", { count = count, maxIdx = max_idx })
+end
+
 function Client:get_book_reviews(book_id, review_list_type, count)
     return self:gateway("/review/list", {
         bookId = book_id,

@@ -362,4 +362,121 @@ host.shelf_group_key = "archive:7"
 host:onWeReadAccountChanged()
 expect(host.shelf_groups == nil and host.shelf_group_key == nil, "account switch retained old groups")
 
+-- Recommendations reuse the cover grid and cover worker without touching the shelf.
+shelf_settings.view_mode = "cover"
+host.isNetworkOnline = function() return true end
+host.requireLogin = function() return true end
+host.runOnlineTask = function(_self, _label, callback) callback() return true end
+host.showInfo = function() end
+local listed
+host.showList = function(_self, title, items, empty) listed = { title, items, empty } end
+local recommend_calls = {}
+local recommend_batch = {}
+for index = 1, 40 do
+    recommend_batch[index] = {
+        bookId = "rec" .. index, title = "Rec " .. index, searchIdx = index,
+        cover = "https://cdn.example/rec" .. index,
+    }
+end
+host.client = {
+    get_recommendations = function(_self, count, max_idx)
+        recommend_calls[#recommend_calls + 1] = { count = count, max_idx = max_idx }
+        return { books = recommend_batch }
+    end,
+    get_binary = function() return "\255\216\255cover" end,
+}
+local cached_recommendations
+host.library_db.cacheRecommendations = function(_self, books) cached_recommendations = books end
+local shelf_view_before = host.shelf_view
+local shown_before = #shown
+host:showRecommendations()
+expect(cached_recommendations == recommend_batch,
+    "fetched recommendations were not cached for the Home screen")
+local first = shown[shown_before + 1]
+expect(recommend_calls[1].count == 40 and recommend_calls[1].max_idx == nil,
+    "first recommendation request used the wrong count/cursor")
+expect(first.data.mode == "recommend" and first.data.cover_mode == true
+        and first.data.paged == true and #first.data.books == 40,
+    "recommendations did not open as a paged cover grid")
+expect(first.callbacks.on_sort == nil and first.callbacks.on_search == nil
+        and first.callbacks.on_filter == nil and first.callbacks.on_switch == nil,
+    "recommendations exposed shelf-only callbacks")
+expect(host.shelf_view == shelf_view_before,
+    "opening recommendations replaced the bookshelf view")
+-- The cover batch redraws the recommendation page only.
+expect(host.recommend_view ~= nil and #shown > shown_before + 1
+        and shown[#shown].data.mode == "recommend"
+        and shown[#shown].data.cover_paths[recommend_batch[1]] ~= nil,
+    "cover batch did not redraw the recommendation grid with cached paths")
+expect(host.shelf_view == shelf_view_before, "cover batch touched the bookshelf view")
+
+local selected
+host.showBookRecord = function(_self, book) selected = book end
+first.callbacks.on_select(recommend_batch[3])
+expect(selected == recommend_batch[3], "recommendation selection did not open the book")
+
+first.callbacks.on_page_changed(2)
+expect(shown[#shown].data.page == 2 and shown[#shown].data.mode == "recommend",
+    "recommendation page change was not retained")
+
+local before_refresh = #recommend_calls
+first.callbacks.on_refresh()
+expect(#recommend_calls == before_refresh + 1 and recommend_calls[#recommend_calls].max_idx == 40,
+    "refresh did not continue after the last searchIdx")
+
+recommend_batch = {}
+local infos = {}
+host.showInfo = function(_self, text) infos[#infos + 1] = text end
+first.callbacks.on_refresh()
+expect(#infos == 1 and infos[1] == "No more recommendations.",
+    "empty refresh did not tell the user there is nothing more")
+expect(#host.recommend_books == 40, "empty refresh discarded the current recommendations")
+
+host.recommend_books = nil
+host:showRecommendations()
+expect(listed and listed[1] == "Recommendations" and listed[3] == "No recommendations.",
+    "first empty recommendation result did not show the empty state")
+
+-- Closing the recommendation view forgets it, so a late cover batch or refresh cannot reopen it.
+host.recommend_books = recommend_batch
+host:showRecommendView(nil, 1)
+local open_view = host.recommend_view
+local views_before = #shown
+local closed_cb = shown[#shown].callbacks.on_closed
+expect(type(closed_cb) == "function", "recommendation view did not register a close hook")
+closed_cb()
+expect(host.recommend_view == nil, "closing the recommendation view did not forget it")
+host.recommend_view = nil
+local before_late = host.recommend_books
+recommend_batch = { { bookId = "late", title = "Late" } }
+host:showRecommendations(true, open_view)
+expect(#shown == views_before and host.recommend_books == before_late,
+    "a refresh that finished after the view closed still reopened or replaced it")
+recommend_batch = {}
+for index = 1, 40 do recommend_batch[index] = { bookId = "n" .. index, title = "N", searchIdx = index } end
+
+-- closeWeReadUI and an account switch also drop the recommendation state.
+local closed_widgets = {}
+local real_close = package.loaded["ui/uimanager"].close
+package.loaded["ui/uimanager"].close = function(_self, widget) closed_widgets[#closed_widgets + 1] = widget end
+host.recommend_view = { name = "rec" }
+host.recommend_books = recommend_batch
+host:onWeReadAccountChanged()
+package.loaded["ui/uimanager"].close = real_close
+expect(host.recommend_view == nil and host.recommend_books == nil,
+    "account change kept the previous account's recommendations")
+expect(#closed_widgets >= 1 and closed_widgets[1].name == "rec",
+    "closeWeReadUI left the recommendation view on the window stack")
+
+-- A stale recommendation view must not redraw after the user left it.
+local stale = { page = 1, page_size = 1 }
+host.recommend_view = {}
+local redraws = 0
+host.shelf_cover_generation = host.shelf_cover_generation + 1
+host:fetchVisibleShelfCovers(stale, { { bookId = "s", cover = "https://cdn.example/s" } }, {
+    is_current = function(candidate) return host.recommend_view == candidate end,
+    on_done = function() redraws = redraws + 1 end,
+})
+expect(redraws == 0, "stale recommendation view was redrawn by a finished cover task")
+
 print(("bookshelf_pagination_spec: %d checks"):format(checks))
